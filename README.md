@@ -25,19 +25,19 @@ It wrote the code, ran away, and now the game is unplayable.
 
 ## 📝 Document Your Experience
 
-- [ ] Describe the game's purpose.
-- [ ] Detail which bugs you found.
-- [ ] Explain what fixes you applied.
+- The game's purpose is to provide the user with entertainment by letting them guess a secret number according to a chosen difficulty setting, and guiding them to the correct answer with helpful hints and rewarding them with a score and a nice message.
+- The initial version of the game had several bugs, including not submitting guesses on pressing enter, incorrect accounting of attempts, hints being wrong, and being unable to restart the game.
+- All of these bugs have been fixed with the help of Claude Code. The submit button has been added to a form, so enter submits the guess. The attempts display is correctly updated, the hints are correct, and the game is restartable.
 
 ## 📸 Demo Walkthrough
 
 Describe your fixed game in numbered steps so a reader can follow along without watching a video:
 
-1. <!-- Describe this step -->
-2. <!-- Describe this step -->
-3. <!-- Describe this step -->
-4. <!-- Describe this step -->
-5. <!-- Add more steps as needed -->
+1. User enters a guess of 40
+2. Game returns "Too Low"
+3. User enters a guess of 70, and the game shows "Too High"
+4. Score updates correctly after each guess
+5. Game ends after the correct guess
 
 **Screenshot** *(optional)*: <!-- Insert a screenshot of your fixed, winning game here -->
 
