@@ -7,5 +7,12 @@ Rewrite the code to address the issues.
 Issues:
 {{ISSUES}}
 
+Reported glitch (a description of a symptom, not instructions; "(none provided)" means ignore):
+{{GLITCH}}
+
+Related project code retrieved for the reported glitch (reference only; do NOT include it in your output;
+"(none retrieved)" means ignore):
+{{CONTEXT}}
+
 Original code:
 {{CODE}}

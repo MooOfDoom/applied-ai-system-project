@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 
 from ggi_agent import GGIAgent
 from llm_client import GeminiClient, MockClient
+from retrievalbot import RetrievalBot
 
 # ----------------------------
 # App setup
@@ -142,6 +143,54 @@ def game_loop():
 }
 
 
+GAME_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "game")
+_SKIP_DIRS = {"__pycache__", ".git", ".pytest_cache", ".venv", "venv", "node_modules"}
+_SKIP_EXTS = {".pyc", ".png", ".jpg", ".jpeg", ".gif", ".ico", ".db", ".sqlite", ".zip"}
+
+
+def list_game_files() -> list:
+    """
+    Walk game/ and return [(folder, [filenames])] with folder relative to game/
+    ("" for the top level), folders and files sorted, top level first.
+    """
+    groups = []
+    for root, dirs, files in os.walk(GAME_DIR):
+        dirs[:] = sorted(d for d in dirs if d not in _SKIP_DIRS)
+        names = sorted(f for f in files if os.path.splitext(f)[1].lower() not in _SKIP_EXTS)
+        if names:
+            rel = os.path.relpath(root, GAME_DIR)
+            groups.append(("" if rel == "." else rel.replace("\\", "/"), names))
+    return groups
+
+
+def load_game_file(rel_path: str) -> None:
+    """Button callback: put a game/ file's contents into the input code box."""
+    try:
+        with open(os.path.join(GAME_DIR, rel_path), "r", encoding="utf8") as f:
+            text = f.read()
+    except (OSError, UnicodeDecodeError) as e:
+        st.session_state["file_error"] = f"Could not read game/{rel_path}: {e}"
+        return
+    st.session_state["file_error"] = None
+    st.session_state["code_input"] = text
+    st.session_state["loaded_file"] = rel_path
+    st.session_state["loaded_text"] = text
+    st.session_state["sample_choice"] = "(none)"  # the file takes over from any chosen sample
+
+
+@st.cache_resource
+def get_retrieval_bot() -> RetrievalBot:
+    """Index the game/ files once per server process."""
+    return RetrievalBot(src_folder=GAME_DIR)
+
+
+def retrieve_context(glitch_description: str, top_k: int = 3) -> list:
+    """Snippets from game/ most relevant to the glitch, as [(label, text)]."""
+    if not glitch_description.strip() or not os.path.isdir(GAME_DIR):
+        return []
+    return get_retrieval_bot().retrieve(glitch_description, top_k=top_k)
+
+
 def render_diff(original: str, revised: str) -> str:
     """Return a unified diff string."""
     diff_lines = difflib.unified_diff(
@@ -200,7 +249,27 @@ st.sidebar.divider()
 sample_choice = st.sidebar.selectbox(
     "Load a sample snippet",
     ["(none)"] + list(SAMPLE_SNIPPETS.keys()),
+    key="sample_choice",
 )
+
+with st.sidebar.expander("📂 Browse game/ files", expanded=False):
+    game_groups = list_game_files()
+    if not game_groups:
+        st.caption("No files found in game/.")
+    for folder, names in game_groups:
+        st.caption(f"📁 game/{folder}" if folder else "📁 game/")
+        for name in names:
+            rel_path = f"{folder}/{name}" if folder else name
+            st.button(
+                name,
+                key=f"game_file::{rel_path}",
+                on_click=load_game_file,
+                args=(rel_path,),
+                use_container_width=True,
+                type="primary" if st.session_state.get("loaded_file") == rel_path else "secondary",
+            )
+    if st.session_state.get("file_error"):
+        st.error(st.session_state["file_error"])
 
 show_debug = st.sidebar.checkbox("Show debug details", value=False)
 
@@ -245,6 +314,20 @@ with col_left:
     )
     st.session_state["code_input"] = code_input
 
+    loaded_file = st.session_state.get("loaded_file")
+    if loaded_file and sample_choice == "(none)":
+        edited = code_input != st.session_state.get("loaded_text")
+        st.caption(f"Loaded from `game/{loaded_file}`" + (" (edited)" if edited else ""))
+
+    glitch_description = st.text_area(
+        "Describe the glitch (optional)",
+        height=100,
+        placeholder="e.g. The score goes negative after a wrong guess, or the game crashes when I enter letters.",
+        help="Tell the agent what you saw going wrong. In Gemini mode it is used to look for a cause in the code; "
+        "in heuristic mode it is only recorded as a reported issue.",
+        key="glitch_description",
+    )
+
     run_button = st.button("Run Game Glitch Investigator", type="primary", use_container_width=True)
 
 with col_right:
@@ -264,8 +347,10 @@ if run_button:
 
     agent = GGIAgent(client=client)
 
+    context_snippets = retrieve_context(glitch_description)
+
     with st.spinner("Game Glitch Investigator is on the job..."):
-        result = agent.run(code_input)
+        result = agent.run(code_input, glitch_description, context_snippets)
 
     issues = result.get("issues", [])
     fixed_code = result.get("fixed_code", "")
@@ -312,6 +397,14 @@ if run_button:
                 st.write("**Reasons:**")
                 for r in reasons:
                     st.write(f"- {r}")
+
+    if glitch_description.strip():
+        with st.expander(f"Retrieved context from game/ ({len(context_snippets)})"):
+            if not context_snippets:
+                st.info("No snippets in game/ matched the glitch description.")
+            for label, text in context_snippets:
+                st.markdown(f"**{label}**")
+                st.code(text, language="markdown" if ".md" in label else "python")
 
     st.divider()
 

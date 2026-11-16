@@ -67,7 +67,8 @@ def evaluate_retrieval(bot, top_k=3):
         expected = expected_files_for_query(query)
         retrieved = bot.retrieve(query, top_k=top_k)
 
-        retrieved_files = [fname for fname, _ in retrieved]
+        # Chunk labels look like "app.py (parse_guess)"; compare on the file path only
+        retrieved_files = [label.split(" (")[0] for label, _ in retrieved]
 
         hit = any(f in retrieved_files for f in expected) if expected else False
         if hit:

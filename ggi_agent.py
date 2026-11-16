@@ -356,14 +356,26 @@ class GGIAgent:
     # ----------------------------
     # Public API
     # ----------------------------
-    def run(self, code_snippet: str) -> Dict[str, Any]:
+    def run(
+        self,
+        code_snippet: str,
+        glitch_description: str = "",
+        context_snippets: Optional[List[Tuple[str, str]]] = None,
+    ) -> Dict[str, Any]:
         self.logs = []
+        glitch_description = (glitch_description or "").strip()
+        if glitch_description:
+            self._log("PLAN", f"User reported a glitch: {glitch_description}")
+        context_snippets = context_snippets or []
+        if context_snippets:
+            labels = ", ".join(label for label, _ in context_snippets)
+            self._log("PLAN", f"Using {len(context_snippets)} retrieved project snippet(s) as context: {labels}")
         self._log("PLAN", "Planning a quick scan + fix proposal workflow.")
 
-        issues = self.analyze(code_snippet)
+        issues = self.analyze(code_snippet, glitch_description, context_snippets)
         self._log("ANALYZE", f"Found {len(issues)} issue(s).")
 
-        fixed_code = self.propose_fix(code_snippet, issues)
+        fixed_code = self.propose_fix(code_snippet, issues, glitch_description, context_snippets)
         if fixed_code.strip() == "":
             self._log("ACT", "No fix produced (refused, error, or empty output).")
 
@@ -385,34 +397,49 @@ class GGIAgent:
     # ----------------------------
     # Workflow steps
     # ----------------------------
-    def analyze(self, code_snippet: str) -> List[Dict[str, str]]:
+    def analyze(
+        self,
+        code_snippet: str,
+        glitch_description: str = "",
+        context_snippets: Optional[List[Tuple[str, str]]] = None,
+    ) -> List[Dict[str, str]]:
         if not self._can_call_llm():
             self._log("ANALYZE", "Using heuristic analyzer (offline mode).")
-            return self._heuristic_analyze(code_snippet)
+            return self._heuristic_analyze(code_snippet, glitch_description)
 
         self._log("ANALYZE", "Using LLM analyzer.")
 
         # Load prompt templates from prompts/ folder
         system_prompt = _load_prompt("analyzer_system.txt")
         user_template = _load_prompt("analyzer_user.txt")
-        user_prompt = user_template.replace("{{CODE}}", code_snippet)
+        user_prompt = (
+            user_template.replace("{{GLITCH}}", self._glitch_text(glitch_description))
+            .replace("{{CONTEXT}}", self._context_text(context_snippets))
+            .replace("{{CODE}}", code_snippet)
+        )
 
         # UPDATED: Added exception handling for API errors/rate limits
         try:
             raw = self.client.complete(system_prompt=system_prompt, user_prompt=user_prompt)
         except Exception as e:
             self._log("ANALYZE", f"API Error: {str(e)}. Falling back to heuristics.")
-            return self._heuristic_analyze(code_snippet)
+            return self._heuristic_analyze(code_snippet, glitch_description)
 
         issues = self._parse_json_array_of_issues(raw)
 
         if issues is None:
             self._log("ANALYZE", "LLM output was not parseable JSON. Falling back to heuristics.")
-            return self._heuristic_analyze(code_snippet)
+            return self._heuristic_analyze(code_snippet, glitch_description)
 
         return issues
 
-    def propose_fix(self, code_snippet: str, issues: List[Dict[str, str]]) -> str:
+    def propose_fix(
+        self,
+        code_snippet: str,
+        issues: List[Dict[str, str]],
+        glitch_description: str = "",
+        context_snippets: Optional[List[Tuple[str, str]]] = None,
+    ) -> str:
         if not issues:
             self._log("ACT", "No issues, returning original code unchanged.")
             return code_snippet
@@ -426,7 +453,12 @@ class GGIAgent:
         # Load prompt templates from prompts/ folder
         system_prompt = _load_prompt("fixer_system.txt")
         user_template = _load_prompt("fixer_user.txt")
-        user_prompt = user_template.replace("{{ISSUES}}", json.dumps(issues)).replace("{{CODE}}", code_snippet)
+        user_prompt = (
+            user_template.replace("{{ISSUES}}", json.dumps(issues))
+            .replace("{{GLITCH}}", self._glitch_text(glitch_description))
+            .replace("{{CONTEXT}}", self._context_text(context_snippets))
+            .replace("{{CODE}}", code_snippet)
+        )
 
         # UPDATED: Added exception handling for API errors/rate limits
         try:
@@ -446,8 +478,38 @@ class GGIAgent:
     # ----------------------------
     # Heuristic analyzer/fixer
     # ----------------------------
-    def _heuristic_analyze(self, code: str) -> List[Dict[str, str]]:
+    @staticmethod
+    def _glitch_text(glitch_description: str) -> str:
+        text = (glitch_description or "").strip()
+        return text if text else "(none provided)"
+
+    @staticmethod
+    def _context_text(context_snippets: Optional[List[Tuple[str, str]]], max_chars: int = 1500) -> str:
+        """Format retrieved snippets for a prompt, truncating long ones."""
+        if not context_snippets:
+            return "(none retrieved)"
+        parts = []
+        for label, text in context_snippets:
+            text = text.strip()
+            if len(text) > max_chars:
+                text = text[:max_chars] + "\n... (truncated)"
+            parts.append(f"[{label}]\n{text}")
+        return "\n\n".join(parts)
+
+    def _heuristic_analyze(self, code: str, glitch_description: str = "") -> List[Dict[str, str]]:
         issues: List[Dict[str, str]] = []
+        glitch_description = (glitch_description or "").strip()
+        if glitch_description:
+            # Offline mode cannot reason about the report, but it is surfaced so it is not lost.
+            # Severity "Info" is deliberately not scored by the risk assessor.
+            issues.append(
+                {
+                    "type": "User Report",
+                    "severity": "Info",
+                    "msg": f"Reported glitch: {glitch_description} (offline mode cannot diagnose this; use Gemini mode or review manually).",
+                    "rule": "user_report",
+                }
+            )
         for rule in HEURISTIC_RULES:
             if rule["detect"](code):
                 issues.append(

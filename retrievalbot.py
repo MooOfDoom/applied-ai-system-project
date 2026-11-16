@@ -9,8 +9,17 @@ Core RetrievalBot class responsible for:
 
 import os
 import ast
-import glob
 import re
+
+SKIP_DIRS = frozenset({"__pycache__", "node_modules", "venv", ".venv", "site-packages"})
+
+STOPWORDS = frozenset(
+    "a an the and or but if then else of to in on at by for from with without is are was were be been "
+    "it its this that these those i me my we you your he she they them as so do does did not no "
+    "when what why how which who after before again than too very can will just into out up down "
+    "get gets got goes going".split()
+)
+
 
 class RetrievalBot:
     def __init__(self, src_folder="game", llm_client=None):
@@ -36,16 +45,25 @@ class RetrievalBot:
 
     def load_source(self):
         """
-        Loads all .py, .md and .txt files inside src_folder.
-        Returns a list of tuples: (filename, text)
+        Loads all .py, .md and .txt files inside src_folder, including subfolders.
+        Returns a list of tuples: (filename, text), where filename is the path
+        relative to src_folder using forward slashes (e.g. "tests/test_logic.py"),
+        so files with the same name in different folders stay distinct.
         """
         code = []
-        pattern = os.path.join(self.src_folder, "*.*")
-        for path in glob.glob(pattern):
-            if path.endswith(".py") or path.endswith(".md") or path.endswith(".txt"):
-                with open(path, "r", encoding="utf8") as f:
-                    text = f.read()
-                filename = os.path.basename(path)
+        for root, dirs, files in os.walk(self.src_folder):
+            # Skip caches, VCS folders and hidden folders; sort for deterministic order
+            dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS and not d.startswith("."))
+            for name in sorted(files):
+                if not name.endswith((".py", ".md", ".txt")):
+                    continue
+                path = os.path.join(root, name)
+                try:
+                    with open(path, "r", encoding="utf8") as f:
+                        text = f.read()
+                except (OSError, UnicodeDecodeError):
+                    continue  # unreadable or non-UTF-8 file: skip it
+                filename = os.path.relpath(path, self.src_folder).replace(os.sep, "/")
                 code.append((filename, text))
         return code
 
@@ -136,6 +154,11 @@ class RetrievalBot:
                     ids.append(chunk_id)
         return index
 
+    @classmethod
+    def _query_tokens(cls, query):
+        """Distinct query words, without common filler words that match everything."""
+        return {t for t in cls._tokenize(query) if t not in STOPWORDS and len(t) > 1}
+
     @staticmethod
     def _tokenize(text):
         """Lowercase and split text into word tokens, ignoring punctuation."""
@@ -156,7 +179,7 @@ class RetrievalBot:
         - Return the count as the score
         """
         text_tokens = set(self._tokenize(text))
-        query_tokens = set(self._tokenize(query))
+        query_tokens = self._query_tokens(query)
         return sum(1 for token in query_tokens if token in text_tokens)
 
     def retrieve(self, query, top_k=3):
@@ -168,7 +191,7 @@ class RetrievalBot:
         """
         # Use the index to narrow down to chunks containing at least one query word
         candidates = set()
-        for token in set(self._tokenize(query)):
+        for token in self._query_tokens(query):
             candidates.update(self.index.get(token, []))
 
         scored = []
