@@ -3,14 +3,14 @@ import difflib
 import streamlit as st
 from dotenv import load_dotenv
 
-from bughound_agent import BugHoundAgent
+from ggi_agent import GGIAgent
 from llm_client import GeminiClient, MockClient
 
 # ----------------------------
 # App setup
 # ----------------------------
-st.set_page_config(page_title="BugHound", page_icon="🐶", layout="wide")
-st.title("🐶 BugHound")
+st.set_page_config(page_title="Game Glitch Investigator", page_icon="🕵️", layout="wide")
+st.title("🕵️ Game Glitch Investigator")
 st.caption("A tiny agent that analyzes code, proposes a fix, and runs simple reliability checks.")
 
 # Load environment variables from .env if present
@@ -152,7 +152,7 @@ with col_left:
     )
     st.session_state["code_input"] = code_input
 
-    run_button = st.button("Run BugHound", type="primary", use_container_width=True)
+    run_button = st.button("Run Game Glitch Investigator", type="primary", use_container_width=True)
 
 with col_right:
     st.subheader("Outputs")
@@ -169,9 +169,9 @@ if run_button:
         st.error("Gemini mode is selected, but no API key is available.")
         st.stop()
 
-    agent = BugHoundAgent(client=client)
+    agent = GGIAgent(client=client)
 
-    with st.spinner("BugHound is sniffing around..."):
+    with st.spinner("Game Glitch Investigator is on the job..."):
         result = agent.run(code_input)
 
     issues = result.get("issues", [])
@@ -224,7 +224,7 @@ if run_button:
 
     # [cite_start]UPDATED: Check if a fallback occurred due to API limits/errors and notify the user. [cite: 119, 128]
     if any("API Error" in log.get("message", "") for log in logs):
-        st.warning("⚠️ API Request Failed: BugHound hit a limit or network error and used heuristic rules instead.")
+        st.warning("⚠️ API Request Failed: Game Glitch Investigator hit a limit or network error and used heuristic rules instead.")
 
     st.subheader("Proposed fix")
     if not fixed_code.strip():

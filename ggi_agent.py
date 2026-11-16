@@ -16,9 +16,9 @@ def _load_prompt(filename: str) -> str:
         return f.read()
 
 
-class BugHoundAgent:
+class GGIAgent:
     """
-    BugHound runs a small agentic workflow:
+    GGIAgent runs a small agentic workflow:
 
     1) PLAN: decide what to look for
     2) ANALYZE: detect issues (heuristics or LLM)
@@ -161,7 +161,7 @@ class BugHoundAgent:
         fixed = code
 
         if any(i.get("type") == "Reliability" for i in issues):
-            fixed = re.sub(r"\bexcept\s*:\s*", "except Exception as e:\n        # [BugHound] log or handle the error\n        ", fixed)
+            fixed = re.sub(r"\bexcept\s*:\s*", "except Exception as e:\n        # [Game Glitch Investigator] log or handle the error\n        ", fixed)
 
         if any(i.get("type") == "Code Quality" for i in issues):
             if "import logging" not in fixed:
