@@ -39,6 +39,89 @@ class GeminiClient:
         self.model_name = model_name
         self.temperature = float(temperature)
 
+	
+
+    # -----------------------------------------------------------
+    # Phase 0: naive generation over full docs
+    # -----------------------------------------------------------
+
+    def naive_answer_over_full_docs(self, query, all_text):
+        # We ignore all_text and send a generic prompt instead
+        prompt = f"""
+    You are a documentation assistant. 
+    Answer this developer question: {query}
+    """
+        try:
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=prompt
+            )
+            return (response.text or "").strip()
+        except Exception as e:
+            return f"Unable to generate an answer. ({type(e).__name__}: {e})"
+
+    # -----------------------------------------------------------
+    # Phase 2: RAG style generation over retrieved snippets
+    # -----------------------------------------------------------
+
+    def answer_from_snippets(self, query, snippets):
+        """
+        Phase 2:
+        Generate an answer using only the retrieved snippets.
+
+        snippets: list of (filename, text) tuples selected by DocuBot.retrieve
+
+        The prompt:
+        - Shows each snippet with its filename
+        - Instructs the model to rely only on these snippets
+        - Requires an explicit "I do not know" refusal when needed
+        """
+
+        if not snippets:
+            return "I do not know based on the docs I have."
+
+        context_blocks = []
+        for filename, text in snippets:
+            block = f"File: {filename}\n{text}\n"
+            context_blocks.append(block)
+
+        context = "\n\n".join(context_blocks)
+
+        prompt = f"""
+You are a cautious documentation assistant helping developers understand a codebase.
+
+You will receive:
+- A developer question
+- A small set of snippets from project files
+
+Your job:
+- Answer the question using only the information in the snippets.
+- If the snippets do not provide enough evidence, refuse to guess.
+
+Snippets:
+{context}
+
+Developer question:
+{query}
+
+Rules:
+- Use only the information in the snippets. Do not invent new functions,
+  endpoints, or configuration values.
+- If the snippets are not enough to answer confidently, reply exactly:
+  "I do not know based on the docs I have."
+- When you do answer, briefly mention which files you relied on.
+"""
+
+        try:
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=prompt
+            )
+            return (response.text or "").strip()
+        except Exception as e:
+            return f"API error — could not generate answer. ({type(e).__name__}: {e})"
+
+
     def complete(self, system_prompt: str, user_prompt: str) -> str:
         """
         Sends a single request to Gemini.
