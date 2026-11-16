@@ -1,9 +1,9 @@
-from bughound_agent import BugHoundAgent
+from ggi_agent import GGIAgent
 from llm_client import MockClient
 
 
 def test_workflow_runs_in_offline_mode_and_returns_shape():
-    agent = BugHoundAgent(client=None)  # heuristic-only
+    agent = GGIAgent(client=None)  # heuristic-only
     code = "def f():\n    print('hi')\n    return True\n"
     result = agent.run(code)
 
@@ -21,7 +21,7 @@ def test_workflow_runs_in_offline_mode_and_returns_shape():
 
 
 def test_offline_mode_detects_print_issue():
-    agent = BugHoundAgent(client=None)
+    agent = GGIAgent(client=None)
     code = "def f():\n    print('hi')\n    return True\n"
     result = agent.run(code)
 
@@ -29,7 +29,7 @@ def test_offline_mode_detects_print_issue():
 
 
 def test_offline_mode_proposes_logging_fix_for_print():
-    agent = BugHoundAgent(client=None)
+    agent = GGIAgent(client=None)
     code = "def f():\n    print('hi')\n    return True\n"
     result = agent.run(code)
 
@@ -40,7 +40,7 @@ def test_offline_mode_proposes_logging_fix_for_print():
 
 def test_mock_client_forces_llm_fallback_to_heuristics_for_analysis():
     # MockClient returns non-JSON for analyzer prompts, so agent should fall back.
-    agent = BugHoundAgent(client=MockClient())
+    agent = GGIAgent(client=MockClient())
     code = "def f():\n    print('hi')\n    return True\n"
     result = agent.run(code)
 

@@ -46,6 +46,99 @@ def add(a, b):
     logging.info("Adding numbers")
     return a + b
 """,
+    "mutable_defaults.py": '''def add_score(player, scores=[]):
+    """Record a score for a player."""
+    scores.append(player)
+    return scores
+
+
+def build_profile(name, tags={}, history=list()):
+    tags[name] = len(history)
+    return tags
+''',
+    "swallowed_errors.py": """def save_score(path, score):
+    try:
+        with open(path, "a") as f:
+            f.write(str(score))
+    except OSError: pass
+
+
+def parse_guess(text):
+    try:
+        return int(text)
+    except ValueError:
+        # ignore bad input
+        pass
+    return None
+""",
+    "comparison_pitfalls.py": """def describe(guess, answer, name):
+    if guess == None:
+        return "no guess"
+    if name is "admin":
+        return "admin guess"
+    if guess is 42:
+        return "the answer"
+    if guess != None and guess == True:
+        return "weird"
+    return "ok"
+""",
+    "network_no_timeout.py": """import requests
+
+
+def fetch_leaderboard(url):
+    response = requests.get(url)
+    return response.json()
+
+
+def submit_score(url, player, score):
+    return requests.post(
+        url,
+        json={"player": player, "score": score},
+    ).status_code
+""",
+    "hardcoded_secrets.py": '''"""Client for a (made up) scoreboard service."""
+from __future__ import annotations
+
+API_KEY = "sk-test-1234567890"
+db_password = "hunter2"
+
+
+def connect():
+    return {"key": API_KEY, "password": db_password}
+''',
+    "debug_leftovers.py": """import pdb
+
+
+def apply_bonus(score, bonus):
+    pdb.set_trace()
+    if bonus > 10:
+        breakpoint()
+    return score + bonus
+""",
+    "flag_only_issues.py": """# FIXME: none of these have an automatic fix; they should be flagged only.
+from math import *
+
+
+def read_config(path):
+    f = open(path)
+    return f.read()
+
+
+def run_formula(expression):
+    return eval(expression)
+
+
+def last_index_sum(items):
+    total = 0
+    for i in range(len(items) + 1):
+        total += items[i]
+    return total
+
+
+def game_loop():
+    while True:
+        pass
+""",
 }
 
 
