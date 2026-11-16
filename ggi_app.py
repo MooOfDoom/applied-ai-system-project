@@ -3,7 +3,7 @@ import difflib
 import streamlit as st
 from dotenv import load_dotenv
 
-from ggi_agent import GGIAgent
+from ggi_agent import MAX_GLITCH_CHARS, MAX_LLM_CODE_CHARS, GGIAgent
 from llm_client import GeminiClient, MockClient
 from retrievalbot import RetrievalBot
 
@@ -145,7 +145,8 @@ def game_loop():
 
 GAME_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "game")
 _SKIP_DIRS = {"__pycache__", ".git", ".pytest_cache", ".venv", "venv", "node_modules"}
-_SKIP_EXTS = {".pyc", ".png", ".jpg", ".jpeg", ".gif", ".ico", ".db", ".sqlite", ".zip"}
+MAX_FILE_BYTES = 100_000  # largest game/ file the browser will load into the input box
+_SKIP_EXTS ={".pyc", ".png", ".jpg", ".jpeg", ".gif", ".ico", ".db", ".sqlite", ".zip"}
 
 
 def list_game_files() -> list:
@@ -166,7 +167,11 @@ def list_game_files() -> list:
 def load_game_file(rel_path: str) -> None:
     """Button callback: put a game/ file's contents into the input code box."""
     try:
-        with open(os.path.join(GAME_DIR, rel_path), "r", encoding="utf8") as f:
+        full_path = os.path.join(GAME_DIR, rel_path)
+        if os.path.getsize(full_path) > MAX_FILE_BYTES:
+            st.session_state["file_error"] = f"game/{rel_path} is larger than {MAX_FILE_BYTES // 1000} KB and was not loaded."
+            return
+        with open(full_path, "r", encoding="utf8") as f:
             text = f.read()
     except (OSError, UnicodeDecodeError) as e:
         st.session_state["file_error"] = f"Could not read game/{rel_path}: {e}"
@@ -205,7 +210,7 @@ def render_diff(original: str, revised: str) -> str:
 
 def require_code_input(code: str) -> bool:
     if not code.strip():
-        st.warning("Paste some code or load a sample snippet to begin.")
+        st.warning("Paste some code, load a sample snippet, or describe a glitch to begin.")
         return False
     return True
 
@@ -227,6 +232,12 @@ mode = st.sidebar.selectbox(
 # [cite_start]UPDATED: Added a warning for free-tier users to manage expectations regarding API limits. [cite: 176, 192]
 if mode == "Gemini (requires API key)":
     st.sidebar.warning("⚠️ Gemini Free Tier: You have a limit of ~20 requests. Use Heuristic mode for initial testing to save your quota.")
+    st.sidebar.warning(
+        "🔒 Privacy: in this mode your code, glitch description and any retrieved game/ snippets are sent to "
+        "the Gemini API. Likely passwords, tokens and API keys are replaced with placeholders first, but "
+        "this is pattern matching and can miss things. Don't paste anything confidential. "
+        f"Code over {MAX_LLM_CODE_CHARS:,} characters is never sent; offline rules are used instead."
+    )
 
 model_name = st.sidebar.selectbox(
     "Gemini model",
@@ -246,12 +257,6 @@ temperature = st.sidebar.slider(
 
 st.sidebar.divider()
 
-sample_choice = st.sidebar.selectbox(
-    "Load a sample snippet",
-    ["(none)"] + list(SAMPLE_SNIPPETS.keys()),
-    key="sample_choice",
-)
-
 with st.sidebar.expander("📂 Browse game/ files", expanded=False):
     game_groups = list_game_files()
     if not game_groups:
@@ -270,6 +275,12 @@ with st.sidebar.expander("📂 Browse game/ files", expanded=False):
             )
     if st.session_state.get("file_error"):
         st.error(st.session_state["file_error"])
+
+sample_choice = st.sidebar.selectbox(
+    "Load a sample snippet",
+    ["(none)"] + list(SAMPLE_SNIPPETS.keys()),
+    key="sample_choice",
+)
 
 show_debug = st.sidebar.checkbox("Show debug details", value=False)
 
@@ -299,7 +310,7 @@ st.sidebar.info(client_status)
 col_left, col_right = st.columns([1, 1])
 
 with col_left:
-    st.subheader("Input code")
+    st.subheader("Source Code")
     if sample_choice != "(none)":
         default_code = SAMPLE_SNIPPETS[sample_choice]
     else:
@@ -322,6 +333,7 @@ with col_left:
     glitch_description = st.text_area(
         "Describe the glitch (optional)",
         height=100,
+        max_chars=MAX_GLITCH_CHARS,
         placeholder="e.g. The score goes negative after a wrong guess, or the game crashes when I enter letters.",
         help="Tell the agent what you saw going wrong. In Gemini mode it is used to look for a cause in the code; "
         "in heuristic mode it is only recorded as a reported issue.",
@@ -338,8 +350,33 @@ with col_right:
 # Run workflow
 # ----------------------------
 if run_button:
-    if not require_code_input(code_input):
+    analysis_code = code_input
+    context_snippets = []
+    code_snippets = []
+
+    if not code_input.strip() and glitch_description.strip():
+        # No code was provided: investigate the glitch using the game/ code the retriever finds.
+        retrieved = retrieve_context(glitch_description, top_k=8)
+        is_python = lambda snippet: snippet[0].split(" (")[0].endswith(".py")
+        code_snippets = [s for s in retrieved if is_python(s)][:3]
+        context_snippets = [s for s in retrieved if not is_python(s)][:3]
+
+        if not code_snippets:
+            st.warning(
+                "No code was provided and no Python code in game/ matched the glitch description. "
+                "Paste some code, or describe the glitch with more specific words (function names, symptoms)."
+            )
+            st.stop()
+
+        analysis_code = "\n\n".join(f"# ---- {label} ----\n{text}" for label, text in code_snippets)
+        st.info(
+            "No input code was provided, so the agent is analyzing code retrieved from game/: "
+            + ", ".join(f"`{label}`" for label, _ in code_snippets)
+        )
+    elif not require_code_input(code_input):
         st.stop()
+    else:
+        context_snippets = retrieve_context(glitch_description)
 
     if mode == "Gemini (requires API key)" and client is None:
         st.error("Gemini mode is selected, but no API key is available.")
@@ -347,10 +384,8 @@ if run_button:
 
     agent = GGIAgent(client=client)
 
-    context_snippets = retrieve_context(glitch_description)
-
     with st.spinner("Game Glitch Investigator is on the job..."):
-        result = agent.run(code_input, glitch_description, context_snippets)
+        result = agent.run(analysis_code, glitch_description, context_snippets)
 
     issues = result.get("issues", [])
     fixed_code = result.get("fixed_code", "")
@@ -399,18 +434,28 @@ if run_button:
                     st.write(f"- {r}")
 
     if glitch_description.strip():
-        with st.expander(f"Retrieved context from game/ ({len(context_snippets)})"):
-            if not context_snippets:
+        shown_snippets = code_snippets + context_snippets
+        with st.expander(f"Retrieved from game/ ({len(shown_snippets)})"):
+            if not shown_snippets:
                 st.info("No snippets in game/ matched the glitch description.")
-            for label, text in context_snippets:
+            for label, text in shown_snippets:
                 st.markdown(f"**{label}**")
                 st.code(text, language="markdown" if ".md" in label else "python")
 
     st.divider()
 
     # [cite_start]UPDATED: Check if a fallback occurred due to API limits/errors and notify the user. [cite: 119, 128]
-    if any("API Error" in log.get("message", "") for log in logs):
-        st.warning("⚠️ API Request Failed: Game Glitch Investigator hit a limit or network error and used heuristic rules instead.")
+    if mode == "Gemini (requires API key)":
+        messages = [log.get("message", "") for log in logs]
+        fallbacks = [m for m in messages if "alling back" in m]
+        if fallbacks:
+            st.warning(
+                "⚠️ Gemini was not used for every step, so offline rules took over:\n\n"
+                + "\n".join(f"- {m}" for m in fallbacks)
+            )
+        redactions = [m for m in messages if m.startswith("Redacted")]
+        if redactions:
+            st.info("🔒 " + redactions[0] + " The fix shown has the original values restored.")
 
     st.subheader("Proposed fix")
     if not fixed_code.strip():
@@ -422,7 +467,7 @@ if run_button:
             st.text_area("Fixed code", value=fixed_code, height=320)
 
         with fix_cols[1]:
-            diff_text = render_diff(code_input, fixed_code)
+            diff_text = render_diff(analysis_code, fixed_code)
             st.text_area("Diff (unified)", value=diff_text, height=320)
 
     st.divider()

@@ -66,7 +66,7 @@ def update_score(current_score: int, outcome: str, attempt_number: int):
 
 st.set_page_config(page_title="Glitchy Guesser", page_icon="🎮")
 
-st.title("🎮 Game Glitch Investigator")
+st.title("🎮 Glitchy Guesser")
 st.caption("An AI-generated guessing game. Something is off.")
 
 st.sidebar.header("Settings")

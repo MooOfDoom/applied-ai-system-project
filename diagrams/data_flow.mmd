@@ -1,0 +1,149 @@
+flowchart TD
+    %% ---------- Inputs ----------
+    subgraph INPUTS["User inputs (Streamlit sidebar and main page)"]
+        SAMPLE["Sample snippet picker"]
+        BROWSER["game/ file browser"]
+        PASTE["Pasted code"]
+        GLITCH["Glitch description (optional, max 1,000 chars)"]
+        MODE["Model mode: Heuristic only or Gemini"]
+    end
+
+    CODEBOX["Input code box"]
+    SAMPLE -->|snippet text| CODEBOX
+    BROWSER -->|"file contents (files over 100 KB are refused)"| CODEBOX
+    PASTE --> CODEBOX
+
+    GAME[("game/ folder<br/>py, md, txt files<br/>including subfolders")]
+    BROWSER -. lists and reads .-> GAME
+
+    RUN{{"Run button"}}
+    CODEBOX --> RUN
+    GLITCH --> RUN
+    MODE --> CLIENTSEL["Choose client:<br/>MockClient (offline)<br/>or GeminiClient (needs API key)"]
+    MODE -->|Gemini| NOTICE["Sidebar privacy notice:<br/>code, glitch and snippets are sent to the API"]
+
+    %% ---------- Retrieval ----------
+    subgraph RETRIEVAL["RetrievalBot (built once, cached)"]
+        LOAD["load_source<br/>walk game/ recursively"]
+        CHUNK["chunk_source<br/>py: one chunk per function<br/>md and txt: one chunk per paragraph"]
+        INDEX["build_index<br/>word to chunk ids"]
+        SCORE["retrieve<br/>look up query words, score chunks,<br/>drop zero scores, take top k"]
+        LOAD --> CHUNK --> INDEX --> SCORE
+    end
+    GAME --> LOAD
+
+    RUN --> HASCODE{"Code box empty<br/>and glitch given?"}
+    HASCODE -->|"no: code present"| CTX1["retrieve top 3 for glitch<br/>(skipped if no glitch)"]
+    HASCODE -->|"yes: glitch only"| CTX2["retrieve top 8 for glitch"]
+    GLITCH -->|query| SCORE
+    SCORE --> CTX1
+    SCORE --> CTX2
+
+    CTX2 --> SPLIT["Split results:<br/>up to 3 py chunks become the code to analyze,<br/>up to 3 other chunks become context"]
+    CTX2 -->|"no py chunk matched"| STOPWARN["Warning shown, run stops"]
+    CTX1 --> CONTEXT["context_snippets"]
+    SPLIT --> CONTEXT
+    SPLIT --> ANALYSIS["analysis_code"]
+    CODEBOX -->|code present| ANALYSIS
+
+    %% ---------- Agent ----------
+    subgraph AGENT["GGIAgent.run"]
+        PLAN["PLAN: cut glitch to 1,000 chars,<br/>log glitch and context labels"]
+
+        subgraph ANALYZE["analyze"]
+            CANLLM1{"Client has complete()?"}
+            SIZE1{"Code over<br/>20,000 chars?"}
+            REDACT1["Redact likely secrets<br/>to placeholders (SecretRedactor)"]
+            PROMPT1["Fill analyzer prompts<br/>CODE, GLITCH, CONTEXT"]
+            LLM1["client.complete"]
+            PARSE{"Valid JSON array<br/>of issues?"}
+            HEUR1["Heuristic analyzer<br/>HEURISTIC_RULES detectors<br/>plus User Report issue if glitch given"]
+            CANLLM1 -->|yes| SIZE1
+            CANLLM1 -->|no| HEUR1
+            SIZE1 -->|"yes: nothing is sent"| HEUR1
+            SIZE1 -->|no| REDACT1 --> PROMPT1 --> LLM1 --> PARSE
+            LLM1 -->|"API error or empty reply"| HEUR1
+            PARSE -->|no, fall back| HEUR1
+        end
+
+        ISSUES["issues<br/>type, severity, msg"]
+
+        subgraph FIX["propose_fix"]
+            ANYISSUE{"Any issues?"}
+            CANLLM2{"Client has complete()?"}
+            SIZE2{"Code over<br/>20,000 chars?"}
+            REDACT2["Redact likely secrets<br/>to placeholders (SecretRedactor)"]
+            PROMPT2["Fill fixer prompts<br/>ISSUES, GLITCH, CONTEXT, CODE"]
+            LLM2["client.complete,<br/>strip code fences"]
+            RESTORE["Restore the real secret values<br/>in the returned code (local only)"]
+            HEUR2["Heuristic fixer<br/>runs fixers for matching rules"]
+            ORIG["Return code unchanged"]
+            ANYISSUE -->|no| ORIG
+            ANYISSUE -->|yes| CANLLM2
+            CANLLM2 -->|yes| SIZE2
+            CANLLM2 -->|no| HEUR2
+            SIZE2 -->|"yes: nothing is sent"| HEUR2
+            SIZE2 -->|no| REDACT2 --> PROMPT2 --> LLM2
+            LLM2 -->|"API error or empty output"| HEUR2
+            LLM2 --> RESTORE
+        end
+
+        FIXED["fixed_code"]
+        RISK["assess_risk<br/>original, fixed, issues<br/>to score, level, reasons, should_autofix"]
+        TRACE["logs<br/>PLAN, ANALYZE, ACT, TEST, REFLECT"]
+
+        PLAN --> CANLLM1
+        HEUR1 --> ISSUES
+        PARSE -->|yes| ISSUES
+        ISSUES --> ANYISSUE
+        ORIG --> FIXED
+        RESTORE --> FIXED
+        HEUR2 --> FIXED
+        FIXED --> RISK
+    end
+
+    PROMPTS[("prompts/*.txt<br/>analyzer and fixer templates")]
+    PROMPTS -.-> PROMPT1
+    PROMPTS -.-> PROMPT2
+    CLIENTSEL -. client .-> CANLLM1
+    CLIENTSEL -. client .-> CANLLM2
+    GEMINI(["Gemini API"])
+    LLM1 <-.-> GEMINI
+    LLM2 <-.-> GEMINI
+
+    ANALYSIS --> PLAN
+    CONTEXT --> PLAN
+    %% Everything that goes into a prompt passes through redaction first
+    CONTEXT -.-> REDACT1
+    CONTEXT -.-> REDACT2
+    GLITCH -.-> REDACT1
+    GLITCH -.-> REDACT2
+    ANALYSIS -.-> REDACT1
+    ANALYSIS -.-> REDACT2
+    ISSUES -.-> REDACT2
+
+    %% Every fallback from the LLM to the offline rules is written to the trace
+    HEUR1 -.->|fallback logged| TRACE
+    HEUR2 -.->|fallback logged| TRACE
+    REDACT1 -.->|redaction count logged| TRACE
+    REDACT2 -.->|redaction count logged| TRACE
+
+    %% ---------- Outputs ----------
+    subgraph OUTPUTS["Displayed results"]
+        OUT1["Detected issues"]
+        OUT2["Risk report"]
+        OUT3["Retrieved snippets expander"]
+        OUT4["Proposed fix and unified diff<br/>(diff is against analysis_code)"]
+        OUT5["Agent trace"]
+        OUT6["Gemini-mode notices:<br/>fallback warning and redaction notice"]
+    end
+    ISSUES --> OUT1
+    RISK --> OUT2
+    CONTEXT --> OUT3
+    SPLIT --> OUT3
+    FIXED --> OUT4
+    ANALYSIS --> OUT4
+    TRACE --> OUT5
+    TRACE -->|Gemini mode only| OUT6
+    PLAN --> TRACE
+    RISK --> TRACE

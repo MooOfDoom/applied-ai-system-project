@@ -1,0 +1,143 @@
+classDiagram
+    direction LR
+
+    %% ---------- UI / entry points ----------
+    class GGIApp {
+        <<Streamlit app>>
+        +SAMPLE_SNIPPETS dict
+        +GAME_DIR str
+        +list_game_files() list
+        +load_game_file(rel_path) None
+        +MAX_FILE_BYTES int
+        +get_retrieval_bot() RetrievalBot
+        +retrieve_context(glitch, top_k) list
+        +render_diff(original, revised) str
+        +require_code_input(code) bool
+        shows privacy notice, fallback warning, redaction notice
+    }
+
+    class RagMain {
+        <<CLI>>
+        +main()
+        +run_naive_llm_mode(bot, has_llm)
+        +run_retrieval_only_mode(bot)
+        +run_rag_mode(bot, has_llm)
+    }
+
+    %% ---------- Agent ----------
+    class GGIAgent {
+        +client LLMClient
+        +logs list
+        +MAX_LLM_CODE_CHARS int
+        +MAX_GLITCH_CHARS int
+        +run(code_snippet, glitch_description, context_snippets) dict
+        +analyze(code_snippet, glitch_description, context_snippets) list
+        +propose_fix(code_snippet, issues, glitch_description, context_snippets) str
+        -_heuristic_analyze(code, glitch_description) list
+        -_heuristic_fix(code, issues) str
+        -_glitch_text(glitch_description) str
+        -_context_text(context_snippets, max_chars) str
+        -_redact_for_llm(step, code, glitch, context) tuple
+        -_parse_json_array_of_issues(text) list
+        -_normalize_issues(arr) list
+        -_strip_code_fences(text) str
+        -_can_call_llm() bool
+        -_log(step, message)
+    }
+
+    class HeuristicRules {
+        <<module-level table>>
+        +HEURISTIC_RULES list
+        rule = id, type, severity, msg, detect, fix
+        +_ensure_import(code, module) str
+    }
+
+    class PromptTemplates {
+        <<prompt files>>
+        analyzer_system.txt
+        analyzer_user.txt
+        fixer_system.txt
+        fixer_user.txt
+        placeholders CODE, ISSUES, GLITCH, CONTEXT
+    }
+
+    class SecretRedactor {
+        <<module>>
+        +count int
+        +redact(text) str
+        +restore(text) str
+    }
+
+    class RiskAssessor {
+        <<module>>
+        +assess_risk(original_code, fixed_code, issues) dict
+    }
+
+    %% ---------- Retrieval ----------
+    class RetrievalBot {
+        +src_folder str
+        +llm_client GeminiClient
+        +source_code list
+        +chunks list
+        +index dict
+        +load_source() list
+        +chunk_source(source_code) list
+        -_chunk_python(filename, text) list
+        -_chunk_paragraphs(filename, text) list
+        +build_index(chunks) dict
+        +score_file(query, text) int
+        +retrieve(query, top_k) list
+        +answer_retrieval_only(query, top_k) str
+        +answer_rag(query, top_k) str
+        +full_corpus_text() str
+        -_query_tokens(query) set
+        -_tokenize(text) list
+    }
+
+    class GameFolder {
+        <<data folder>>
+        py md txt files
+        includes subfolders
+    }
+
+    %% ---------- LLM clients ----------
+    class LLMClient {
+        <<interface>>
+        +complete(system_prompt, user_prompt) str
+    }
+
+    class MockClient {
+        +complete(system_prompt, user_prompt) str
+    }
+
+    class GeminiClient {
+        +model_name str
+        +temperature float
+        +complete(system_prompt, user_prompt) str
+        +answer_from_snippets(query, snippets) str
+        +naive_answer_over_full_docs(query, all_text) str
+    }
+
+    %% ---------- Relationships ----------
+    GGIApp --> GGIAgent : creates and runs
+    GGIApp --> RetrievalBot : retrieves glitch context
+    GGIApp --> MockClient : offline mode
+    GGIApp --> GeminiClient : Gemini mode
+    GGIApp ..> GameFolder : file browser
+
+    GGIAgent --> LLMClient : optional client
+    GGIAgent ..> HeuristicRules : offline analysis and fixes
+    GGIAgent ..> PromptTemplates : loads for LLM calls
+    GGIAgent ..> SecretRedactor : redacts before LLM calls, restores in fix
+    GGIAgent ..> RiskAssessor : assess_risk after fix
+
+    RetrievalBot ..> GameFolder : loads and chunks
+    RetrievalBot --> GeminiClient : optional, for RAG answers
+
+    RagMain --> RetrievalBot
+    RagMain --> GeminiClient
+
+    LLMClient <|.. MockClient
+    LLMClient <|.. GeminiClient
+
+    note for GeminiClient "complete returns an empty string on any API error, which the agent logs as a fallback"

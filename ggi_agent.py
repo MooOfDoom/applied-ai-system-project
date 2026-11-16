@@ -4,10 +4,16 @@ import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+from reliability.redaction import SecretRedactor
 from reliability.risk_assessor import assess_risk
 
 # Directory where prompt templates live, relative to this file
 PROMPTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prompts")
+
+# Input size limits. Code longer than MAX_LLM_CODE_CHARS is never sent to the LLM (the offline
+# rules still analyze all of it). Glitch descriptions are cut to MAX_GLITCH_CHARS.
+MAX_LLM_CODE_CHARS = 20_000
+MAX_GLITCH_CHARS = 1_000
 
 
 def _load_prompt(filename: str) -> str:
@@ -364,6 +370,9 @@ class GGIAgent:
     ) -> Dict[str, Any]:
         self.logs = []
         glitch_description = (glitch_description or "").strip()
+        if len(glitch_description) > MAX_GLITCH_CHARS:
+            self._log("PLAN", f"Glitch description was {len(glitch_description):,} characters; cut to {MAX_GLITCH_CHARS:,}.")
+            glitch_description = glitch_description[:MAX_GLITCH_CHARS]
         if glitch_description:
             self._log("PLAN", f"User reported a glitch: {glitch_description}")
         context_snippets = context_snippets or []
@@ -407,15 +416,26 @@ class GGIAgent:
             self._log("ANALYZE", "Using heuristic analyzer (offline mode).")
             return self._heuristic_analyze(code_snippet, glitch_description)
 
+        if len(code_snippet) > MAX_LLM_CODE_CHARS:
+            self._log(
+                "ANALYZE",
+                f"Input is {len(code_snippet):,} characters (LLM limit is {MAX_LLM_CODE_CHARS:,}). "
+                "Nothing was sent to the LLM. Falling back to heuristics.",
+            )
+            return self._heuristic_analyze(code_snippet, glitch_description)
+
         self._log("ANALYZE", "Using LLM analyzer.")
 
         # Load prompt templates from prompts/ folder
         system_prompt = _load_prompt("analyzer_system.txt")
         user_template = _load_prompt("analyzer_user.txt")
+        redactor, safe_code, safe_glitch, safe_context = self._redact_for_llm(
+            "ANALYZE", code_snippet, glitch_description, context_snippets
+        )
         user_prompt = (
-            user_template.replace("{{GLITCH}}", self._glitch_text(glitch_description))
-            .replace("{{CONTEXT}}", self._context_text(context_snippets))
-            .replace("{{CODE}}", code_snippet)
+            user_template.replace("{{GLITCH}}", self._glitch_text(safe_glitch))
+            .replace("{{CONTEXT}}", self._context_text(safe_context))
+            .replace("{{CODE}}", safe_code)
         )
 
         # UPDATED: Added exception handling for API errors/rate limits
@@ -423,6 +443,11 @@ class GGIAgent:
             raw = self.client.complete(system_prompt=system_prompt, user_prompt=user_prompt)
         except Exception as e:
             self._log("ANALYZE", f"API Error: {str(e)}. Falling back to heuristics.")
+            return self._heuristic_analyze(code_snippet, glitch_description)
+
+        if not (raw or "").strip():
+            # GeminiClient returns "" when the API call fails, so say that instead of "bad JSON"
+            self._log("ANALYZE", "LLM returned no output (API error, rate limit, or blocked response). Falling back to heuristics.")
             return self._heuristic_analyze(code_snippet, glitch_description)
 
         issues = self._parse_json_array_of_issues(raw)
@@ -448,16 +473,27 @@ class GGIAgent:
             self._log("ACT", "Using heuristic fixer (offline mode).")
             return self._heuristic_fix(code_snippet, issues)
 
+        if len(code_snippet) > MAX_LLM_CODE_CHARS:
+            self._log(
+                "ACT",
+                f"Input is {len(code_snippet):,} characters (LLM limit is {MAX_LLM_CODE_CHARS:,}). "
+                "Nothing was sent to the LLM. Falling back to heuristic fixer.",
+            )
+            return self._heuristic_fix(code_snippet, issues)
+
         self._log("ACT", "Using LLM fixer.")
 
         # Load prompt templates from prompts/ folder
         system_prompt = _load_prompt("fixer_system.txt")
         user_template = _load_prompt("fixer_user.txt")
+        redactor, safe_code, safe_glitch, safe_context = self._redact_for_llm(
+            "ACT", code_snippet, glitch_description, context_snippets
+        )
         user_prompt = (
-            user_template.replace("{{ISSUES}}", json.dumps(issues))
-            .replace("{{GLITCH}}", self._glitch_text(glitch_description))
-            .replace("{{CONTEXT}}", self._context_text(context_snippets))
-            .replace("{{CODE}}", code_snippet)
+            user_template.replace("{{ISSUES}}", redactor.redact(json.dumps(issues)))
+            .replace("{{GLITCH}}", self._glitch_text(safe_glitch))
+            .replace("{{CONTEXT}}", self._context_text(safe_context))
+            .replace("{{CODE}}", safe_code)
         )
 
         # UPDATED: Added exception handling for API errors/rate limits
@@ -473,7 +509,24 @@ class GGIAgent:
             self._log("ACT", "LLM returned empty output. Falling back to heuristic fixer.")
             return self._heuristic_fix(code_snippet, issues)
 
-        return cleaned
+        # The LLM only saw placeholders; put the real values back so the fix is usable
+        return redactor.restore(cleaned)
+
+    def _redact_for_llm(
+        self,
+        step: str,
+        code: str,
+        glitch_description: str,
+        context_snippets: Optional[List[Tuple[str, str]]],
+    ) -> Tuple[SecretRedactor, str, str, List[Tuple[str, str]]]:
+        """Replace likely secrets with placeholders in everything that is about to be sent."""
+        redactor = SecretRedactor()
+        safe_code = redactor.redact(code)
+        safe_glitch = redactor.redact(glitch_description)
+        safe_context = [(label, redactor.redact(text)) for label, text in (context_snippets or [])]
+        if redactor.count:
+            self._log(step, f"Redacted {redactor.count} likely secret(s) before sending to the LLM.")
+        return redactor, safe_code, safe_glitch, safe_context
 
     # ----------------------------
     # Heuristic analyzer/fixer
