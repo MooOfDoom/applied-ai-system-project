@@ -1,10 +1,13 @@
+import json
 import os
+import re
 import difflib
 import streamlit as st
+import streamlit.components.v1 as components
 from dotenv import load_dotenv
 
 from ggi_agent import MAX_GLITCH_CHARS, MAX_LLM_CODE_CHARS, GGIAgent
-from llm_client import GeminiClient, MockClient
+from llm_client import GeminiClient, MockClient, list_gemini_models
 from retrievalbot import RetrievalBot
 
 # ----------------------------
@@ -196,6 +199,64 @@ def retrieve_context(glitch_description: str, top_k: int = 3) -> list:
     return get_retrieval_bot().retrieve(glitch_description, top_k=top_k)
 
 
+# Plain (non-f) string so the JavaScript braces and \n escapes are left alone
+_CONSOLE_SCRIPT = r"""<script>
+const prompts = __PROMPTS__;
+console.groupCollapsed("[GGI debug] " + prompts.length + " prompt(s) sent to Gemini");
+prompts.forEach((p, i) => {
+  console.groupCollapsed("#" + (i + 1) + " " + p.step);
+  console.log("SYSTEM PROMPT:\n" + p.system);
+  console.log("USER PROMPT:\n" + p.user);
+  console.groupEnd();
+});
+console.groupEnd();
+</script>"""
+
+
+def log_prompts_to_browser_console(prompts: list) -> None:
+    """
+    Write the prompts that were sent to Gemini to the browser's developer console (F12 > Console).
+    Streamlit runs on the server, so this injects a tiny script into the page. The prompts are the
+    redacted versions that were actually sent, so they do not contain detected secrets.
+    """
+    if not prompts:
+        return
+    # json.dumps gives a valid JS literal. Escaping every "<" as \u003c means prompt text
+    # (which comes from user code and retrieved files) can never close or confuse the script tag.
+    payload = json.dumps(prompts).replace("<", "\\u003c")
+    html = _CONSOLE_SCRIPT.replace("__PROMPTS__", payload)
+    if hasattr(st, "iframe"):
+        st.iframe(html, height=1)  # components.v1.html is deprecated in newer Streamlit
+    else:
+        components.html(html, height=0)
+
+
+FALLBACK_GEMINI_MODELS = ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-2.5-pro"]
+_NON_TEXT_MODEL_WORDS = ("image", "tts", "audio", "embedding", "omni", "research", "live", "robotics", "banana")
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def available_gemini_models(api_key: str) -> list:
+    """
+    Text models this API key can call, fetched from the API (cached for an hour, keyed on the key
+    so the key itself is never shown). Falls back to a fixed list if the API cannot be reached.
+    """
+    if not api_key:
+        return list(FALLBACK_GEMINI_MODELS)
+    names = [
+        n for n in list_gemini_models(api_key)
+        if n.startswith("gemini") and not any(w in n for w in _NON_TEXT_MODEL_WORDS)
+    ]
+
+    def version(name: str) -> float:
+        m = re.search(r"gemini-(\d+(?:\.\d+)?)", name)
+        return float(m.group(1)) if m else 0.0
+
+    # Newest first, so the default (first flash-lite) is the most recent one. The API also lists
+    # older models it rejects for newer accounts; the "Test Gemini connection" button shows which.
+    return sorted(names, key=lambda n: (-version(n), n)) or list(FALLBACK_GEMINI_MODELS)
+
+
 def render_diff(original: str, revised: str) -> str:
     """Return a unified diff string."""
     diff_lines = difflib.unified_diff(
@@ -239,10 +300,15 @@ if mode == "Gemini (requires API key)":
         f"Code over {MAX_LLM_CODE_CHARS:,} characters is never sent; offline rules are used instead."
     )
 
+gemini_models = available_gemini_models(os.getenv("GEMINI_API_KEY", "").strip()) if mode == "Gemini (requires API key)" else list(FALLBACK_GEMINI_MODELS)
+default_model = next((m for m in gemini_models if "flash-lite" in m), gemini_models[0])
 model_name = st.sidebar.selectbox(
     "Gemini model",
-    ["gemini-flash-lite-latest", "gemini-2.5-flash", "gemini-2.5-pro"],
+    gemini_models,
+    index=gemini_models.index(default_model),
     disabled=(mode != "Gemini (requires API key)"),
+    help="In Gemini mode this list is fetched from the API, newest first. Some older models are listed "
+    "but rejected for newer accounts; use 'Test Gemini connection' to check the selected one.",
 )
 
 temperature = st.sidebar.slider(
@@ -282,7 +348,12 @@ sample_choice = st.sidebar.selectbox(
     key="sample_choice",
 )
 
-show_debug = st.sidebar.checkbox("Show debug details", value=False)
+show_debug = st.sidebar.checkbox(
+    "Show debug details",
+    value=False,
+    help="Shows the raw result below the output. In Gemini mode it also logs every prompt sent to Gemini "
+    "(after secret redaction) to your browser's developer console.",
+)
 
 # ----------------------------
 # Choose client
@@ -303,6 +374,17 @@ else:
         client_status = "Gemini client ready."
 
 st.sidebar.info(client_status)
+
+if mode == "Gemini (requires API key)" and client is not None:
+    if st.sidebar.button("Test Gemini connection", use_container_width=True,
+                         help="Sends a one-word prompt to the selected model and shows the exact result or error."):
+        with st.sidebar:
+            with st.spinner("Contacting Gemini..."):
+                ok, message = client.check_connection()
+        if ok:
+            st.sidebar.success("✅ " + message)
+        else:
+            st.sidebar.error("❌ " + message)
 
 # ----------------------------
 # Main input
@@ -480,6 +562,9 @@ if run_button:
             step = entry.get("step", "LOG")
             message = entry.get("message", "")
             st.write(f"**{step}:** {message}")
+
+    if show_debug and mode == "Gemini (requires API key)":
+        log_prompts_to_browser_console(result.get("prompts", []))
 
     if show_debug:
         st.divider()

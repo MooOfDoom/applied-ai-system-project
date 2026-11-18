@@ -38,8 +38,7 @@ class GeminiClient:
         self.client = genai.Client(api_key=api_key)
         self.model_name = model_name
         self.temperature = float(temperature)
-
-	
+        self.last_error = None  # reason for the most recent failed complete() call
 
     # -----------------------------------------------------------
     # Phase 0: naive generation over full docs
@@ -129,6 +128,7 @@ Rules:
         If an error occurs, it returns an empty string, triggering the agent's
         heuristic fallback logic.
         """
+        self.last_error = None
         try:
             merged_prompt = f"{system_prompt}\n\n{user_prompt}".strip()
             response = self.client.models.generate_content(
@@ -137,9 +137,51 @@ Rules:
             )
 
             # Defensive: response.text can be None or raise an error if blocked by filters.
-            return response.text or ""
+            text = response.text or ""
+            if not text:
+                self.last_error = "The response contained no text (it may have been blocked by a safety filter)."
+            return text
 
-        except Exception:
+        except Exception as e:
             # Returning empty string allows the agent to detect the failure
-            # and switch to offline rules.
+            # and switch to offline rules. The reason is kept in last_error so it can be shown.
+            self.last_error = _describe_error(e)
             return ""
+
+    # -----------------------------------------------------------
+    # Diagnostics used by the app
+    # -----------------------------------------------------------
+
+    def check_connection(self) -> tuple:
+        """Send a one-word prompt. Returns (ok, message) with the real error text on failure."""
+        try:
+            response = self.client.models.generate_content(
+                model=self.model_name, contents="Reply with the single word: ok"
+            )
+            return True, f"{self.model_name} replied: {(response.text or '').strip()[:40] or '(empty)'}"
+        except Exception as e:
+            return False, _describe_error(e)
+
+
+def _describe_error(e: Exception) -> str:
+    """Short one-line description of an API exception."""
+    return f"{type(e).__name__}: {str(e)[:300]}"
+
+
+def list_gemini_models(api_key: str) -> list:
+    """
+    Names of models (without the 'models/' prefix) that support generateContent for this key,
+    sorted. Returns [] if the API cannot be reached; callers should have a fallback list.
+    """
+    try:
+        from google import genai
+
+        client = genai.Client(api_key=api_key)
+        names = [
+            m.name.split("/", 1)[-1]
+            for m in client.models.list()
+            if "generateContent" in (m.supported_actions or [])
+        ]
+        return sorted(names)
+    except Exception:
+        return []

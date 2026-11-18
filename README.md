@@ -63,7 +63,7 @@ Requires Python 3.10 or newer.
    ```bash
    python -m streamlit run ggi_app.py
    ```
-4. In the sidebar, pick **Heuristic only (no API)** or **Gemini**. Then load a sample snippet, browse a file from `game/`, or paste your own code, optionally describe a glitch, and click **Run Game Glitch Investigator**.
+4. In the sidebar, pick **Heuristic only (no API)** or **Gemini**. Then load a sample snippet, browse a file from `game/`, or paste your own code, optionally describe a glitch, and click **Run Game Glitch Investigator**. To see exactly what was sent to Gemini, tick **Show debug details** in the sidebar and open your browser's developer console (F12, Console tab); each prompt is logged there with secrets already redacted.
 5. Run the tests:
    ```bash
    python -m pytest tests

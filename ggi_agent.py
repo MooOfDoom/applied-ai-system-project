@@ -358,6 +358,8 @@ class GGIAgent:
         # client should implement: complete(system_prompt: str, user_prompt: str) -> str
         self.client = client
         self.logs: List[Dict[str, str]] = []
+        # Every prompt sent to the client in the last run, exactly as sent (after secret redaction)
+        self.prompt_log: List[Dict[str, str]] = []
 
     # ----------------------------
     # Public API
@@ -369,6 +371,7 @@ class GGIAgent:
         context_snippets: Optional[List[Tuple[str, str]]] = None,
     ) -> Dict[str, Any]:
         self.logs = []
+        self.prompt_log = []
         glitch_description = (glitch_description or "").strip()
         if len(glitch_description) > MAX_GLITCH_CHARS:
             self._log("PLAN", f"Glitch description was {len(glitch_description):,} characters; cut to {MAX_GLITCH_CHARS:,}.")
@@ -401,6 +404,7 @@ class GGIAgent:
             "fixed_code": fixed_code,
             "risk": risk,
             "logs": self.logs,
+            "prompts": self.prompt_log,
         }
 
     # ----------------------------
@@ -440,14 +444,14 @@ class GGIAgent:
 
         # UPDATED: Added exception handling for API errors/rate limits
         try:
-            raw = self.client.complete(system_prompt=system_prompt, user_prompt=user_prompt)
+            raw = self._complete("ANALYZE", system_prompt, user_prompt)
         except Exception as e:
             self._log("ANALYZE", f"API Error: {str(e)}. Falling back to heuristics.")
             return self._heuristic_analyze(code_snippet, glitch_description)
 
         if not (raw or "").strip():
             # GeminiClient returns "" when the API call fails, so say that instead of "bad JSON"
-            self._log("ANALYZE", "LLM returned no output (API error, rate limit, or blocked response). Falling back to heuristics.")
+            self._log("ANALYZE", f"LLM returned no output ({self._client_error()}). Falling back to heuristics.")
             return self._heuristic_analyze(code_snippet, glitch_description)
 
         issues = self._parse_json_array_of_issues(raw)
@@ -498,7 +502,7 @@ class GGIAgent:
 
         # UPDATED: Added exception handling for API errors/rate limits
         try:
-            raw = self.client.complete(system_prompt=system_prompt, user_prompt=user_prompt)
+            raw = self._complete("ACT", system_prompt, user_prompt)
         except Exception as e:
             self._log("ACT", f"API Error: {str(e)}. Falling back to heuristic fixer.")
             return self._heuristic_fix(code_snippet, issues)
@@ -506,11 +510,21 @@ class GGIAgent:
         cleaned = self._strip_code_fences(raw).strip()
 
         if not cleaned:
-            self._log("ACT", "LLM returned empty output. Falling back to heuristic fixer.")
+            self._log("ACT", f"LLM returned empty output ({self._client_error()}). Falling back to heuristic fixer.")
             return self._heuristic_fix(code_snippet, issues)
 
         # The LLM only saw placeholders; put the real values back so the fix is usable
         return redactor.restore(cleaned)
+
+    def _client_error(self) -> str:
+        """Why the last LLM call produced nothing, if the client recorded a reason."""
+        reason = getattr(self.client, "last_error", None)
+        return reason or "API error, rate limit, or blocked response"
+
+    def _complete(self, step: str, system_prompt: str, user_prompt: str) -> str:
+        """Call the client, recording the prompt first so it is captured even if the call fails."""
+        self.prompt_log.append({"step": step, "system": system_prompt, "user": user_prompt})
+        return self.client.complete(system_prompt=system_prompt, user_prompt=user_prompt)
 
     def _redact_for_llm(
         self,
